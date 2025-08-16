@@ -1,23 +1,34 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-import hashlib
 import json
-import os
+import hashlib
+from typing import List
 
 app = FastAPI()
 security = HTTPBasic()
 
 STUDENTS_FILE = "students.json"
 
-# Helper functions
+class Student:
+    def __init__(self, username: str, password: str, grades: List[int]):
+        self.username = username
+        self.password = self.hash_password(password)
+        self.grades = grades
+
+    def hash_password(self, password: str) -> str:
+        return hashlib.sha256(password.encode()).hexdigest()
+
+    def verify_password(self, password: str) -> bool:
+        return self.password == hashlib.sha256(password.encode()).hexdigest()
+
 def load_students():
-    if not os.path.exists(STUDENTS_FILE):
-        return []
     try:
         with open(STUDENTS_FILE, "r") as f:
             return json.load(f)
-    except Exception:
-        return []
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Error reading student data")
 
 def save_students(students):
     try:
@@ -26,42 +37,40 @@ def save_students(students):
     except Exception:
         raise HTTPException(status_code=500, detail="Error saving student data")
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+def get_current_student(credentials: HTTPBasicCredentials = Depends(security)):
+    students = load_students()
+    username = credentials.username
+    password = credentials.password
 
-# Endpoints
+    if username not in students:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    stored_password = students[username]["password"]
+    hashed_input = hashlib.sha256(password.encode()).hexdigest()
+
+    if hashed_input != stored_password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    return students[username]
+
 @app.post("/register/")
-def register(username: str, password: str):
+def register(username: str, password: str, grades: List[int]):
     students = load_students()
 
-    if any(student["username"] == username for student in students):
+    if username in students:
         raise HTTPException(status_code=400, detail="Username already exists")
 
-    new_student = {
-        "username": username,
-        "password": hash_password(password),
-        "grades": []
-    }
-    students.append(new_student)
+    student = Student(username, password, grades)
+    students[username] = {"password": student.password, "grades": student.grades}
     save_students(students)
+
     return {"message": "Student registered successfully"}
 
 @app.post("/login/")
 def login(credentials: HTTPBasicCredentials = Depends(security)):
-    students = load_students()
-    hashed = hash_password(credentials.password)
-
-    for student in students:
-        if student["username"] == credentials.username and student["password"] == hashed:
-            return {"message": "Login successful"}
-    raise HTTPException(status_code=401, detail="Invalid username or password")
+    student = get_current_student(credentials)
+    return {"message": f"Welcome {credentials.username}"}
 
 @app.get("/grades/")
-def get_grades(credentials: HTTPBasicCredentials = Depends(security)):
-    students = load_students()
-    hashed = hash_password(credentials.password)
-
-    for student in students:
-        if student["username"] == credentials.username and student["password"] == hashed:
-            return {"grades": student["grades"]}
-    raise HTTPException(status_code=401, detail="Unauthorized")
+def get_grades(student: dict = Depends(get_current_student)):
+    return {"grades": student["grades"]}
